@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 import httpx
@@ -10,8 +10,8 @@ import random
 
 app = FastAPI(
     title="API Images IA",
-    description="Generation d'images gratuite - Alternative DALL-E",
-    version="1.0.0"
+    description="Generation d'images gratuite via Pollinations.ai - Alternative DALL-E",
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -27,17 +27,50 @@ class ImageRequest(BaseModel):
     height: int = 1024
     seed: Optional[int] = None
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "image/png,image/*,*/*",
+    "Referer": "https://pollinations.ai/"
+}
+
 @app.get("/")
 def home():
     return {
-        "message": "API Images IA",
+        "message": "API Images IA - Powered by Pollinations.ai",
+        "version": "2.0.0",
         "docs": "/docs",
-        "generate": "/generate?prompt=un chat astronaute",
+        "endpoints": {
+            "/generate": "Generer une image (?prompt=...&width=1024&height=1024&seed=...)",
+            "/url": "Obtenir l'URL directe de l'image (?prompt=...)"
+        },
         "exemples": [
-            "/generate?prompt=un chat astronaute",
+            "/generate?prompt=un chat astronaute dans l espace",
             "/generate?prompt=coucher de soleil sur la mer&width=1280&height=720",
-            "/generate?prompt=portrait futuriste&seed=42"
+            "/url?prompt=portrait futuriste&seed=42"
         ]
+    }
+
+@app.get("/url")
+def get_image_url(
+    prompt: str = Query(..., description="Description de l'image"),
+    width: int = Query(1024, ge=256, le=2048),
+    height: int = Query(1024, ge=256, le=2048),
+    seed: Optional[int] = Query(None)
+):
+    """
+    Retourne l'URL directe de l'image generee (sans telecharger l'image).
+    Utile pour afficher directement dans un navigateur ou une application.
+    """
+    if seed is None:
+        seed = random.randint(1, 999999)
+    safe_prompt = prompt.replace(" ", "%20")
+    url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={width}&height={height}&seed={seed}&nologo=true"
+    return {
+        "url": url,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "seed": seed
     }
 
 @app.get("/generate")
@@ -48,7 +81,7 @@ async def generate_image(
     seed: Optional[int] = Query(None, description="Graine aleatoire (pour reproduire une image)")
 ):
     """
-    Genere une image IA a partir d'un texte descriptif (prompt).
+    Genere et retourne une image IA directement en PNG.
     Utilise Pollinations.ai comme moteur de generation gratuit.
     """
     if not prompt:
@@ -61,24 +94,38 @@ async def generate_image(
     url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={width}&height={height}&seed={seed}&nologo=true"
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(
+            timeout=90.0,
+            follow_redirects=True,
+            headers=HEADERS
+        ) as client:
             response = await client.get(url)
 
-            if response.status_code == 200:
+            if response.status_code == 200 and len(response.content) > 1000:
                 return StreamingResponse(
                     io.BytesIO(response.content),
                     media_type="image/png",
                     headers={
                         "Content-Disposition": f"inline; filename=image_{seed}.png",
-                        "X-Prompt": prompt[:50],
-                        "X-Seed": str(seed)
+                        "X-Prompt": prompt[:100],
+                        "X-Seed": str(seed),
+                        "X-Width": str(width),
+                        "X-Height": str(height)
                     }
                 )
             else:
-                raise HTTPException(status_code=500, detail="Erreur generation image")
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Pollinations.ai indisponible (HTTP {response.status_code}). Essayez /url pour obtenir le lien direct."
+                )
 
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Timeout: la generation d'image prend trop de temps. Essayez /url pour le lien direct."
+        )
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service indisponible: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Erreur: {str(e)}")
 
 
 @app.post("/generate")
